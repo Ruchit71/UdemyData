@@ -11,20 +11,22 @@ Learning & Development	- Completed mandatory 32 hours of training.
 - Training on AppSec, Terraform, and Generative AI (Azure OpenAI).
 - Internal sessions: RAG and LLM technical intros.	- More consistent progress tracking and application of training outcomes in real projects.	- Focus on learning and applying new Python-related technologies.
 - Identify big-picture opportunities for upskilling.
-Project Delivery	- Zero breach of DOD readiness criteria.
-- Automated Notify Report, saving 65% effort.
-- Timely participation in DR setup and testing with onshore team.
-- Regular delivery of committed artifacts and updates to stakeholders.	- Proactively communicate issues like Notify events not being in Splunk earlier.
+Project Delivery	- Successfully set up Disaster Recovery (DR) environments for Shadowcore UAT and PROD.
+- Proposed and implemented a solution to streamline database promotion using Terraform and GitLab pipelines.
+- Conducted end-to-end DR activity for UAT and performed connectivity tests for PROD, including creating a detailed playbook, test documentation, and gathering evidence.
+- Automated the Notify Report process, achieving a 65% reduction in manual effort.	- Proactively communicate issues like Notify events not being in Splunk earlier.
 - Thorough documentation of DR and job failure steps.	- Cross-train team members in DR and production support.
 - Update technical documentation and Wiki regularly.
 Quality Delivery	- No defects leaked to UAT/Production.
 - Automated reports reduced downtime risks.
-- Ensured adherence to coding standards and effective code reviews.	- Address restoration time improvements and avoid build/merge issues.
+- Ensured adherence to coding standards and effective code reviews.
+- Initiated and resolved VITs for Midas-DNA, achieving 100% completion of static scans.	- Address restoration time improvements and avoid build/merge issues.
 - Conduct thorough RCAs for all defects.	- Strengthen code review practices for error-free releases.
 - Document all defect-related RCAs and resolutions.
 Value Adds	- Automated Notify Report (visible time savings).
 - Joined Kaizen Analysis Team for Generative AI model planning.
 - Participated in internal and external technical sessions.
-- Recognized for contributions to ShadowCore DR activities.	- Extend participation to initiatives like CoE and CodeFest.
+- Recognized for contributions to ShadowCore DR activities.
+- Proposed and executed Terraform/GitLab pipeline improvements, showcasing ROI in process streamlining.	- Extend participation to initiatives like CoE and CodeFest.
 - Collaborate more on new POCs and present findings effectively.	- Lead a POC on a new feature/technology.
 - Continue Kaizen contributions with demonstrable outcomes.
