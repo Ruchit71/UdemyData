@@ -1,0 +1,30 @@
+Category	Achievements/Contributions	Areas for Improvement	Focus Areas
+Infosec & Process Compliance	- No unauthorized software installations.
+- No incidents raised by HR/Admin or INFOSEC team.
+- Regular updates of tasks and efforts in ADO.
+- Active participation in agile ceremonies and onshore meetings.
+- Practiced agile principles and ensured follow-up actions.	- Avoid attendance regularizations completely.
+- Document MoM and all action items more comprehensively for future use.	- Maintain compliance with agile processes and document findings clearly.
+- Strengthen attendance discipline.
+Learning & Development	- Completed mandatory 32 hours of training.
+- Certifications: AZ-204.
+- Training on AppSec, Terraform, and Generative AI (Azure OpenAI).
+- Internal sessions: RAG and LLM technical intros.	- More consistent progress tracking and application of training outcomes in real projects.	- Focus on learning and applying new Python-related technologies.
+- Identify big-picture opportunities for upskilling.
+Project Delivery	- Zero breach of DOD readiness criteria.
+- Automated Notify Report, saving 65% effort.
+- Timely participation in DR setup and testing with onshore team.
+- Regular delivery of committed artifacts and updates to stakeholders.	- Proactively communicate issues like Notify events not being in Splunk earlier.
+- Thorough documentation of DR and job failure steps.	- Cross-train team members in DR and production support.
+- Update technical documentation and Wiki regularly.
+Quality Delivery	- No defects leaked to UAT/Production.
+- Automated reports reduced downtime risks.
+- Ensured adherence to coding standards and effective code reviews.	- Address restoration time improvements and avoid build/merge issues.
+- Conduct thorough RCAs for all defects.	- Strengthen code review practices for error-free releases.
+- Document all defect-related RCAs and resolutions.
+Value Adds	- Automated Notify Report (visible time savings).
+- Joined Kaizen Analysis Team for Generative AI model planning.
+- Participated in internal and external technical sessions.
+- Recognized for contributions to ShadowCore DR activities.	- Extend participation to initiatives like CoE and CodeFest.
+- Collaborate more on new POCs and present findings effectively.	- Lead a POC on a new feature/technology.
+- Continue Kaizen contributions with demonstrable outcomes.
