@@ -1,32 +1,128 @@
-Category	Achievements/Contributions	Areas for Improvement	Focus Areas
-Infosec & Process Compliance	- No unauthorized software installations.
-- No incidents raised by HR/Admin or INFOSEC team.
-- Regular updates of tasks and efforts in ADO.
-- Active participation in agile ceremonies and onshore meetings.
-- Practiced agile principles and ensured follow-up actions.	- Avoid attendance regularizations completely.
-- Document MoM and all action items more comprehensively for future use.	- Maintain compliance with agile processes and document findings clearly.
-- Strengthen attendance discipline.
-Learning & Development	- Completed mandatory 32 hours of training.
-- Certifications: AZ-204.
-- Training on AppSec, Terraform, and Generative AI (Azure OpenAI).
-- Internal sessions: RAG and LLM technical intros.	- More consistent progress tracking and application of training outcomes in real projects.	- Focus on learning and applying new Python-related technologies.
-- Identify big-picture opportunities for upskilling.
-Project Delivery	- Successfully set up Disaster Recovery (DR) environments for Shadowcore UAT and PROD.
-- Proposed and implemented a solution to streamline database promotion using Terraform and GitLab pipelines.
-- Conducted end-to-end DR activity for UAT and performed connectivity tests for PROD, including creating a detailed playbook, test documentation, and gathering evidence.
-- Automated the Notify Report process, achieving a 65% reduction in manual effort.	- Proactively communicate issues like Notify events not being in Splunk earlier.
-- Thorough documentation of DR and job failure steps.	- Cross-train team members in DR and production support.
-- Update technical documentation and Wiki regularly.
-Quality Delivery	- No defects leaked to UAT/Production.
-- Automated reports reduced downtime risks.
-- Ensured adherence to coding standards and effective code reviews.
-- Initiated and resolved VITs for Midas-DNA, achieving 100% completion of static scans.	- Address restoration time improvements and avoid build/merge issues.
-- Conduct thorough RCAs for all defects.	- Strengthen code review practices for error-free releases.
-- Document all defect-related RCAs and resolutions.
-Value Adds	- Automated Notify Report (visible time savings).
-- Joined Kaizen Analysis Team for Generative AI model planning.
-- Participated in internal and external technical sessions.
-- Recognized for contributions to ShadowCore DR activities.
-- Proposed and executed Terraform/GitLab pipeline improvements, showcasing ROI in process streamlining.	- Extend participation to initiatives like CoE and CodeFest.
-- Collaborate more on new POCs and present findings effectively.	- Lead a POC on a new feature/technology.
-- Continue Kaizen contributions with demonstrable outcomes.
+import asyncio
+from datetime import datetime
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+# Assuming Pydantic schemas for Customer and Account are defined as `CustomerSchema` and `AccountSchema`
+
+async def upsert_customer_and_account(session: AsyncSession, data: dict):
+    # Initialize AsyncCrud for Customer and Account
+    CustomerCrud = CrudFactory(Customer)
+    AccountCrud = CrudFactory(Account)
+
+    # Prepare data for upsert
+    customer_data = {
+        "uuid": data.get("CUSTOMERID"),  # Map to `customer_id`
+        "customer_id": data["CUSTOMERID"],
+        "account_holder_name": data["ACCOUNTHOLDERNAME"],
+        "entity_name": data["ENTITYNAME"],
+        "office_name": data["OFFICENAME"],
+        "title3": data["TITLE3"],
+        "address_line1": data["ADDRESSLINE1"],
+        "address_line2": data["ADDRESSLINE2"],
+        "address_line3": data["ADDRESSLINE3"],
+        "city": data["CITY"],
+        "state": data["STATE"],
+        "zip": data["ZIP"],
+        "country": data["COUNTRY"],
+    }
+
+    account_data = {
+        "customer_uuid": data["CUSTOMERID"],
+        "account_number": data["ACCOUNTNUMBER"],
+        "date_opened": datetime.strptime(data["DATEOPENED"], "%Y-%m-%d"),
+        "major_account_type": data["MAJORACCOUNTTYPE"],
+        "minor_account_type": data["MINORACCOUNTTYPE"],
+        "account_status": data["ACCOUNTSTATUS"],
+        "available_balance": float(data["AVAILABLEBALANCE"]),
+        "current_balance": float(data["CURRENTBALANCE"]),
+    }
+
+    # Upsert Customer
+    await CustomerCrud.upsert(
+        session,
+        data=customer_data,
+        conflict_columns=["customer_id"],
+        update_columns=["account_holder_name", "entity_name", "address_line1", "city", "state", "zip", "country"],
+    )
+
+    # Upsert Account
+    await AccountCrud.upsert(
+        session,
+        data=account_data,
+        conflict_columns=["account_number"],
+        update_columns=["account_status", "available_balance", "current_balance"],
+    )
+
+async def main():
+    # Replace with your async session setup
+    async with AsyncSession(engine) as session:
+        data = [
+            # Replace with your provided JSON
+        ]
+        for record in data:
+            await upsert_customer_and_account(session, record)
+
+# Run the main function
+asyncio.run(main())
+
+
+from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import IntegrityError
+
+def CrudFactory(model: SnippetModel):
+    class AsyncCrud:
+        # Existing methods...
+
+        @classmethod
+        async def upsert(
+            cls,
+            session: AsyncSession,
+            data: SnippetSchema,
+            conflict_columns: list[str],
+            update_columns: list[str] = None,
+        ) -> SnippetModel:
+            """
+            Performs an upsert operation: inserts the data if it does not exist or
+            updates it if there is a conflict.
+
+            Args:
+                session (AsyncSession): SQLAlchemy async session
+                data (SnippetSchema): Pydantic schema for the upserted data
+                conflict_columns (list[str]): Columns to check for conflicts
+                update_columns (list[str], optional): Columns to update if conflict occurs.
+                    If not provided, all columns except conflict_columns are updated.
+
+            Returns:
+                SnippetModel: Upserted SQLAlchemy model
+            """
+            values = data.model_dump()
+            insert_stmt = insert(model).values(values)
+
+            # Define what happens on conflict
+            update_values = {
+                col: values[col] for col in (update_columns or values.keys())
+                if col not in conflict_columns
+            }
+            upsert_stmt = insert_stmt.on_conflict_do_update(
+                index_elements=conflict_columns,
+                set_=update_values,
+            )
+
+            try:
+                result = await session.execute(upsert_stmt)
+                await session.commit()
+                # Refresh the record to get the latest data
+                if result.returned_defaults:
+                    refreshed_model = await cls.get_one_by_id(
+                        session, id_=result.returned_defaults[conflict_columns[0]]
+                    )
+                    return refreshed_model
+                return await cls.get_one_by_id(session, id_=values[conflict_columns[0]])
+            except IntegrityError as e:
+                raise IntegrityConflictException(f"Integrity error: {e}")
+            except Exception as e:
+                raise SnippetException(f"Unknown error occurred: {e}") from e
+
+    AsyncCrud.model = model
+    return AsyncCrud
