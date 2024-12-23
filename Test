@@ -1,128 +1,40 @@
-import asyncio
-from datetime import datetime
-
 from sqlalchemy.ext.asyncio import AsyncSession
+from models import Customer, Account  # Import your SQLAlchemy models
+from schemas import CustomerSchema, AccountSchema  # Import corresponding Pydantic schemas
+from crud_factory import CrudFactory  # Import your CrudFactory
 
-# Assuming Pydantic schemas for Customer and Account are defined as `CustomerSchema` and `AccountSchema`
+# Create CRUD handlers for Customer and Account models
+CustomerCrud = CrudFactory(Customer)
+AccountCrud = CrudFactory(Account)
 
-async def upsert_customer_and_account(session: AsyncSession, data: dict):
-    # Initialize AsyncCrud for Customer and Account
-    CustomerCrud = CrudFactory(Customer)
-    AccountCrud = CrudFactory(Account)
+async def create_or_update_customer_and_account(session: AsyncSession, customer_data: dict, account_data: dict):
+    """
+    Creates or updates a customer and their associated account.
 
-    # Prepare data for upsert
-    customer_data = {
-        "uuid": data.get("CUSTOMERID"),  # Map to `customer_id`
-        "customer_id": data["CUSTOMERID"],
-        "account_holder_name": data["ACCOUNTHOLDERNAME"],
-        "entity_name": data["ENTITYNAME"],
-        "office_name": data["OFFICENAME"],
-        "title3": data["TITLE3"],
-        "address_line1": data["ADDRESSLINE1"],
-        "address_line2": data["ADDRESSLINE2"],
-        "address_line3": data["ADDRESSLINE3"],
-        "city": data["CITY"],
-        "state": data["STATE"],
-        "zip": data["ZIP"],
-        "country": data["COUNTRY"],
-    }
+    Args:
+        session (AsyncSession): SQLAlchemy async session
+        customer_data (dict): Data for the customer, matching the CustomerSchema
+        account_data (dict): Data for the account, matching the AccountSchema
 
-    account_data = {
-        "customer_uuid": data["CUSTOMERID"],
-        "account_number": data["ACCOUNTNUMBER"],
-        "date_opened": datetime.strptime(data["DATEOPENED"], "%Y-%m-%d"),
-        "major_account_type": data["MAJORACCOUNTTYPE"],
-        "minor_account_type": data["MINORACCOUNTTYPE"],
-        "account_status": data["ACCOUNTSTATUS"],
-        "available_balance": float(data["AVAILABLEBALANCE"]),
-        "current_balance": float(data["CURRENTBALANCE"]),
-    }
+    Returns:
+        tuple: Updated or created Customer and Account models
+    """
+    # Convert input dictionaries to Pydantic schemas
+    customer_schema = CustomerSchema(**customer_data)
+    account_schema = AccountSchema(**account_data)
 
-    # Upsert Customer
-    await CustomerCrud.upsert(
-        session,
-        data=customer_data,
-        conflict_columns=["customer_id"],
-        update_columns=["account_holder_name", "entity_name", "address_line1", "city", "state", "zip", "country"],
-    )
+    # Create or update Customer
+    customer = await CustomerCrud.get_one_by_id(session, customer_data["id"], column="id")
+    if customer:
+        customer = await CustomerCrud.update_by_id(session, customer_schema, id_=customer_data["id"], column="id")
+    else:
+        customer = await CustomerCrud.create(session, customer_schema)
 
-    # Upsert Account
-    await AccountCrud.upsert(
-        session,
-        data=account_data,
-        conflict_columns=["account_number"],
-        update_columns=["account_status", "available_balance", "current_balance"],
-    )
+    # Create or update Account
+    account = await AccountCrud.get_one_by_id(session, account_data["account_number"], column="account_number")
+    if account:
+        account = await AccountCrud.update_by_id(session, account_schema, id_=account_data["account_number"], column="account_number")
+    else:
+        account = await AccountCrud.create(session, account_schema)
 
-async def main():
-    # Replace with your async session setup
-    async with AsyncSession(engine) as session:
-        data = [
-            # Replace with your provided JSON
-        ]
-        for record in data:
-            await upsert_customer_and_account(session, record)
-
-# Run the main function
-asyncio.run(main())
-
-
-from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.exc import IntegrityError
-
-def CrudFactory(model: SnippetModel):
-    class AsyncCrud:
-        # Existing methods...
-
-        @classmethod
-        async def upsert(
-            cls,
-            session: AsyncSession,
-            data: SnippetSchema,
-            conflict_columns: list[str],
-            update_columns: list[str] = None,
-        ) -> SnippetModel:
-            """
-            Performs an upsert operation: inserts the data if it does not exist or
-            updates it if there is a conflict.
-
-            Args:
-                session (AsyncSession): SQLAlchemy async session
-                data (SnippetSchema): Pydantic schema for the upserted data
-                conflict_columns (list[str]): Columns to check for conflicts
-                update_columns (list[str], optional): Columns to update if conflict occurs.
-                    If not provided, all columns except conflict_columns are updated.
-
-            Returns:
-                SnippetModel: Upserted SQLAlchemy model
-            """
-            values = data.model_dump()
-            insert_stmt = insert(model).values(values)
-
-            # Define what happens on conflict
-            update_values = {
-                col: values[col] for col in (update_columns or values.keys())
-                if col not in conflict_columns
-            }
-            upsert_stmt = insert_stmt.on_conflict_do_update(
-                index_elements=conflict_columns,
-                set_=update_values,
-            )
-
-            try:
-                result = await session.execute(upsert_stmt)
-                await session.commit()
-                # Refresh the record to get the latest data
-                if result.returned_defaults:
-                    refreshed_model = await cls.get_one_by_id(
-                        session, id_=result.returned_defaults[conflict_columns[0]]
-                    )
-                    return refreshed_model
-                return await cls.get_one_by_id(session, id_=values[conflict_columns[0]])
-            except IntegrityError as e:
-                raise IntegrityConflictException(f"Integrity error: {e}")
-            except Exception as e:
-                raise SnippetException(f"Unknown error occurred: {e}") from e
-
-    AsyncCrud.model = model
-    return AsyncCrud
+    return customer, account
