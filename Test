@@ -1,124 +1,257 @@
-async def create_or_update_customer_and_account(data: list[dict]):
+import json
+import os
+from datetime import datetime
+from typing import List, Dict, Tuple
+
+import azure.functions as func
+from helpers import cryptography_service
+from helpers.event_hub_logger import EventHubLogger
+from models.database import SessionLocal
+from repository import crud
+from models.account import Account, AccountSchema
+from models.customer import Customer, CustomerSchema
+
+service_bus_queue_blueprint = func.Blueprint()
+
+
+@service_bus_queue_blueprint.function_name(name="ServiceBusQueueTrigger")
+@service_bus_queue_blueprint.service_bus_queue_trigger(
+    arg_name="message",
+    queue_name=os.environ["PENDING_ACCOUNTS"],
+    connection="RTB_SB_CONNECTION_STRING",
+)
+async def service_bus_queue_reader(message: func.ServiceBusMessage):
     """
-    Creates or updates customers and their associated accounts in batches.
+    Azure Function to process Service Bus queue messages for account updates.
 
     Args:
-        data (list[dict]): List of dictionaries containing customer and account data.
+        message (func.ServiceBusMessage): The Service Bus message received from the queue.
+    """
+    logger = EventHubLogger("process_accounts")
+    try:
+        message_body = message.get_body().decode("utf-8")
+        accounts: List[Dict] = json.loads(cryptography_service.decrypt(message_body))
+        await create_or_update_customer_and_account(accounts, logger)
+    except Exception as ex:
+        exception_message = f"Error: {ex} of Type: {type(ex)}"
+        logger.log_critical(exception_message)
+        return await logger.send_internal_error_response(f"{ex}")
+
+
+async def create_or_update_customer_and_account(data: List[Dict], logger: EventHubLogger):
+    """
+    Creates or updates customers and their associated accounts.
+
+    Args:
+        data (List[Dict]): List of dictionaries containing customer and account data.
+        logger (EventHubLogger): Logger instance for logging events.
     """
     CustomerCrud = crud.CrudFactory(Customer)
     AccountCrud = crud.CrudFactory(Account)
 
-    customer_updates = {}
-    account_updates = []
-
     async with SessionLocal() as session:
-        # Fetch existing customers
-        customer_ids = [entry["CUSTOMERID"] for entry in data]
-        existing_customers = await CustomerCrud.get_many_by_ids(
-            session, ids=customer_ids, column="customer_id"
+        existing_customers = await fetch_existing_customers(data, CustomerCrud, session)
+        customer_updates, new_customers = process_customer_data(data, existing_customers)
+
+        await update_customers(customer_updates, CustomerCrud)
+        await create_new_customers(new_customers, CustomerCrud)
+
+        customer_uuid_map = await fetch_customer_uuid_map(data, CustomerCrud, session)
+
+        existing_accounts = await fetch_existing_accounts(data, AccountCrud, session)
+        account_updates, new_accounts = process_account_data(data, existing_accounts, customer_uuid_map)
+
+        await update_accounts(account_updates, AccountCrud)
+        await create_new_accounts(new_accounts, AccountCrud)
+
+
+async def fetch_existing_customers(data: List[Dict], CustomerCrud, session) -> Dict[str, Customer]:
+    """
+    Fetches existing customers from the database.
+
+    Args:
+        data (List[Dict]): List of dictionaries containing customer data.
+        CustomerCrud: CRUD instance for customer operations.
+        session: Database session.
+
+    Returns:
+        Dict[str, Customer]: Mapping of customer IDs to Customer objects.
+    """
+    customer_ids = [entry["CUSTOMERID"] for entry in data]
+    existing_customers = await CustomerCrud.get_many_by_ids(session, ids=customer_ids, column="customer_id")
+    return {customer.customer_id: customer for customer in existing_customers}
+
+
+def process_customer_data(data: List[Dict], existing_customers: Dict[str, Customer]) -> Tuple[Dict[str, CustomerSchema], List[CustomerSchema]]:
+    """
+    Processes customer data to determine updates and new entries.
+
+    Args:
+        data (List[Dict]): List of dictionaries containing customer data.
+        existing_customers (Dict[str, Customer]): Mapping of existing customer IDs to Customer objects.
+
+    Returns:
+        Tuple[Dict[str, CustomerSchema], List[CustomerSchema]]: 
+            - Dictionary of updates for existing customers.
+            - List of schemas for new customers.
+    """
+    customer_updates = {}
+    new_customers = []
+
+    for entry in data:
+        customer_schema = CustomerSchema(
+            customer_id=entry["CUSTOMERID"],
+            account_holder_name=entry["ACCOUNTHOLDERNAME"],
+            entity_name=entry["ENTITYNAME"],
+            office_name=entry["OFFICENAME"],
+            title3=entry["TITLE3"],
+            address_line1=entry["ADDRESSLINE1"],
+            address_line2=entry["ADDRESSLINE2"],
+            address_line3=entry["ADDRESSLINE3"],
+            city=entry["CITY"],
+            state=entry["STATE"],
+            zip=entry["ZIP"],
+            country=entry["COUNTRY"],
         )
-        existing_customer_map = {customer.customer_id: customer for customer in existing_customers}
+        if entry["CUSTOMERID"] in existing_customers:
+            customer = existing_customers[entry["CUSTOMERID"]]
+            updated_customer_data = {
+                key: value
+                for key, value in customer_schema.dict().items()
+                if key not in ["created_at", "updated_at", "uuid"]
+            }
+            existing_data = {
+                field: getattr(customer, field)
+                for field in updated_customer_data.keys()
+                if hasattr(customer, field)
+            }
+            if existing_data != updated_customer_data:
+                customer_updates[customer.uuid] = customer_schema
+        else:
+            new_customers.append(customer_schema)
 
-        # Process customer data
-        for entry in data:
-            customer_schema = CustomerSchema(
-                customer_id=entry["CUSTOMERID"],
-                account_holder_name=entry["ACCOUNTHOLDERNAME"],
-                entity_name=entry["ENTITYNAME"],
-                office_name=entry["OFFICENAME"],
-                title3=entry["TITLE3"],
-                address_line1=entry["ADDRESSLINE1"],
-                address_line2=entry["ADDRESSLINE2"],
-                address_line3=entry["ADDRESSLINE3"],
-                city=entry["CITY"],
-                state=entry["STATE"],
-                zip=entry["ZIP"],
-                country=entry["COUNTRY"],
-            )
+    return customer_updates, new_customers
 
-            if entry["CUSTOMERID"] in existing_customer_map:
-                customer = existing_customer_map[entry["CUSTOMERID"]]
-                if any(
-                    getattr(customer, field) != value
-                    for field, value in customer_schema.dict().items()
-                    if hasattr(customer, field)
-                ):
-                    customer_updates[customer.uuid] = customer_schema
-            else:
-                customer_updates[entry["CUSTOMERID"]] = customer_schema
 
-        # Update customers in bulk
-        if customer_updates:
-            await CustomerCrud.update_many_by_ids(session, customer_updates)
+async def update_customers(customer_updates: Dict[str, CustomerSchema], CustomerCrud):
+    """
+    Updates existing customers in the database.
 
-        # Fetch all updated/created customers to map their UUIDs
-        updated_customers = await CustomerCrud.get_many_by_ids(
-            session, ids=customer_ids, column="customer_id"
+    Args:
+        customer_updates (Dict[str, CustomerSchema]): Mapping of customer UUIDs to updated schemas.
+        CustomerCrud: CRUD instance for customer operations.
+    """
+    if customer_updates:
+        async with SessionLocal() as session:
+            await CustomerCrud.update_many_by_ids(session, customer_updates, "uuid")
+
+
+async def create_new_customers(new_customers: List[CustomerSchema], CustomerCrud):
+    """
+    Creates new customers in the database.
+
+    Args:
+        new_customers (List[CustomerSchema]): List of customer schemas to create.
+        CustomerCrud: CRUD instance for customer operations.
+    """
+    if new_customers:
+        async with SessionLocal() as session:
+            await CustomerCrud.create_many(session, new_customers)
+
+
+async def fetch_customer_uuid_map(data: List[Dict], CustomerCrud, session) -> Dict[str, str]:
+    """
+    Fetches a mapping of customer IDs to UUIDs.
+
+    Args:
+        data (List[Dict]): List of dictionaries containing customer data.
+        CustomerCrud: CRUD instance for customer operations.
+        session: Database session.
+
+    Returns:
+        Dict[str, str]: Mapping of customer IDs to UUIDs.
+    """
+    customer_ids = [entry["CUSTOMERID"] for entry in data]
+    updated_customers = await CustomerCrud.get_many_by_ids(session, ids=customer_ids, column="customer_id")
+    return {customer.customer_id: customer.uuid for customer in updated_customers}
+
+
+async def fetch_existing_accounts(data: List[Dict], AccountCrud, session) -> Dict[str, Account]:
+    """
+    Fetches existing accounts from the database.
+
+    Args:
+        data (List[Dict]): List of dictionaries containing account data.
+        AccountCrud: CRUD instance for account operations.
+        session: Database session.
+
+    Returns:
+        Dict[str, Account]: Mapping of account numbers to Account objects.
+    """
+    account_numbers = [str(entry["ACCOUNTNUMBER"]) for entry in data]
+    existing_accounts = await AccountCrud.get_many_by_ids(session, ids=account_numbers, column="account_number")
+    return {account.account_number: account for account in existing_accounts}
+
+
+def process_account_data(data: List[Dict], existing_accounts: Dict[str, Account], customer_uuid_map: Dict[str, str]) -> Tuple[Dict[str, AccountSchema], List[AccountSchema]]:
+    """
+    Processes account data to determine updates and new entries.
+
+    Args:
+        data (List[Dict]): List of dictionaries containing account data.
+        existing_accounts (Dict[str, Account]): Mapping of existing account numbers to Account objects.
+        customer_uuid_map (Dict[str, str]): Mapping of customer IDs to UUIDs.
+
+    Returns:
+        Tuple[Dict[str, AccountSchema], List[AccountSchema]]: 
+            - Dictionary of updates for existing accounts.
+            - List of schemas for new accounts.
+    """
+    account_updates = {}
+    new_accounts = []
+
+    for entry in data:
+        account_schema = AccountSchema(
+            customer_uuid=customer_uuid_map[entry["CUSTOMERID"]],
+            account_number=str(entry["ACCOUNTNUMBER"]),
+            date_opened=datetime.strptime(entry["DATEOPENED"], "%Y-%m-%d"),
+            major_account_type=entry["MAJORACCOUNTTYPE"],
+            minor_account_type=entry["MINORACCOUNTTYPE"],
+            account_status=entry["ACCOUNTSTATUS"],
+            available_balance=float(entry["AVAILABLEBALANCE"]),
+            current_balance=float(entry["CURRENTBALANCE"]),
         )
-        customer_uuid_map = {customer.customer_id: customer.uuid for customer in updated_customers}
 
-        # Process account data
-        account_numbers = [entry["ACCOUNTNUMBER"] for entry in data]
-        existing_accounts = await AccountCrud.get_many_by_ids(
-            session, ids=account_numbers, column="account_number"
-        )
-        existing_account_map = {account.account_number: account for account in existing_accounts}
+        if str(entry["ACCOUNTNUMBER"]) in existing_accounts:
+            account = existing_accounts[str(entry["ACCOUNTNUMBER"])]
+            account_updates[account.uuid] = account_schema
+        else:
+            new_accounts.append(account_schema)
 
-        for entry in data:
-            account_schema = AccountSchema(
-                customer_uuid=customer_uuid_map[entry["CUSTOMERID"]],
-                account_number=str(entry["ACCOUNTNUMBER"]),
-                date_opened=datetime.strptime(entry["DATEOPENED"], "%Y-%m-%d"),
-                major_account_type=entry["MAJORACCOUNTTYPE"],
-                minor_account_type=entry["MINORACCOUNTTYPE"],
-                account_status=entry["ACCOUNTSTATUS"],
-                available_balance=float(entry["AVAILABLEBALANCE"]),
-                current_balance=float(entry["CURRENTBALANCE"]),
-            )
-
-            if entry["ACCOUNTNUMBER"] in existing_account_map:
-                account = existing_account_map[entry["ACCOUNTNUMBER"]]
-                if any(
-                    getattr(account, field) != value
-                    for field, value in account_schema.dict().items()
-                    if hasattr(account, field)
-                ):
-                    account_updates.append(account_schema)
-            else:
-                account_updates.append(account_schema)
-
-        # Update accounts in bulk
-        if account_updates:
-            await AccountCrud.create_many(session, account_updates)
+    return account_updates, new_accounts
 
 
-# Placeholder for schemas to create new customers
-new_customers = []
+async def update_accounts(account_updates: Dict[str, AccountSchema], AccountCrud):
+    """
+    Updates existing accounts in the database.
 
-# Iterate through the data
-for entry in customer_data:
-    customer_schema = generate_customer_schema(entry)  # Replace with your schema generation logic
+    Args:
+        account_updates (Dict[str, AccountSchema]): Mapping of account UUIDs to updated schemas.
+        AccountCrud: CRUD instance for account operations.
+    """
+    if account_updates:
+        async with SessionLocal() as session:
+            await AccountCrud.update_many_by_ids(session, account_updates, "uuid")
 
-    if entry["CUSTOMERID"] in existing_customer_map:
-        customer = existing_customer_map[entry["CUSTOMERID"]]
 
-        # Compare and update mismatched fields
-        existing_data = {
-            field: getattr(customer, field)
-            for field, value in customer_schema.dict().items()
-            if hasattr(customer, field)
-        }
-        if existing_data != customer_schema.dict():
-            customer_updates[customer.uuid] = customer_schema
-    else:
-        # Collect new customer schemas for bulk creation
-        new_customers.append(customer_schema)
+async def create_new_accounts(new_accounts: List[AccountSchema], AccountCrud):
+    """
+    Creates new accounts in the database.
 
-# Perform updates for existing customers
-for customer_uuid, schema in customer_updates.items():
-    # Update each existing customer in the database
-    await update_customer_in_db(customer_uuid, schema)
-
-# Bulk create new customers in the database
-if new_customers:
-    await create_many(new_customers)  # Bulk create in one operation
+    Args:
+        new_accounts (List[AccountSchema]): List of account schemas to create.
+        AccountCrud: CRUD instance for account operations.
+    """
+    if new_accounts:
+        async with SessionLocal() as session:
+            await AccountCrud.create_many(session, new_accounts)
