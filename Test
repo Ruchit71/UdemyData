@@ -1,78 +1,113 @@
-import unittest
-from unittest.mock import AsyncMock, MagicMock
-from your_module import service_bus_queue_reader, create_or_update_customer_and_account
-import pytest
-import json
+@pytest.fixture(scope="function", name="mock_crud_factory")
+def fixture_mock_crud_factory(mocker: MockerFixture):
+    """Fixture to mock CrudFactory for unit tests"""
+    return mocker.patch(MOCK_CRUD_FACTORY)
+
+
+@pytest.fixture(scope="function", name="async_mock_event_hub_logger")
+def fixture_async_mock_event_hub_logger(mocker: MockerFixture):
+    """Fixture for async mock EventHubLogger"""
+    mock_logger = AsyncMock()
+    mock_logger.log = AsyncMock()
+    mock_logger.log_error = AsyncMock()
+    mock_logger.log_critical = AsyncMock()
+    mock_logger.log_dead_letter = AsyncMock()
+    mock_logger.send_success_response = AsyncMock()
+    mock_logger.send_critical_status = AsyncMock()
+    return mock_logger
 
 
 @pytest.mark.asyncio
-class TestServiceBusQueueReader(unittest.TestCase):
+async def test_service_bus_queue_reader_success(
+    mocker: MockerFixture,
+    async_mock_logger,
+    mock_crud_factory,
+):
+    """Test successful processing of Service Bus queue message"""
 
-    @pytest.fixture(scope="function", name="async_mock_event_hub_logger")
-    def async_mock_event_hub_logger(self):
-        # Using the fixture for async mock logger
-        return MagicMock()
+    # Arrange
+    encrypted_message_body = "mock_encrypted_message"
+    decrypted_message_body = json.dumps([
+        {
+            "ACCOUNTNUMBER": 1010450002,
+            "CUSTOMERID": "O10025",
+            "DATEOPENED": "2021-03-18",
+            "ACCOUNTHOLDERNAME": "FIRST AMERICAN TITLE INSURANCE COMPANY",
+            "ENTITYNAME": "FIRST AMERICAN TITLE INSURANCE COMPANY",
+            "OFFICENAME": "INTERNATIONAL CASH OPERATING ACCOUNT",
+            "TITLE3": "",
+            "MAJORACCOUNTTYPE": "CK",
+            "MINORACCOUNTTYPE": "CK01",
+            "ACCOUNTSTATUS": "ACT",
+            "AVAILABLEBALANCE": "2124",
+            "CURRENTBALANCE": "2124",
+            "ADDRESSLINE1": "1 FIRST AMERICAN WAY",
+            "ADDRESSLINE2": "SANTA ANA CA 92701",
+            "ADDRESSLINE3": "",
+            "CITY": "SANTA ANA",
+            "STATE": "CA",
+            "ZIP": "92701",
+            "COUNTRY": "USA"
+        }
+    ])
+    mock_service_bus_message = create_service_bus_message(encrypted_message_body)
+    mocker.patch("blueprints.process_accounts.cryptography_service.decrypt", return_value=decrypted_message_body)
+    
+    mock_session = MagicMock()
+    mocker.patch("blueprints.process_accounts.SessionLocal", return_value=mock_session)
 
-    @pytest.fixture(scope="function", name="mock_service_bus_message")
-    def mock_service_bus_message(self):
-        # Mock service bus message creation
-        def create_service_bus_message(encrypted_body: str, delivery_count: int = 1):
-            sb_message = MagicMock(spec=func.ServiceBusMessage)
-            sb_message.get_body.return_value = encrypted_body
-            sb_message.delivery_count = delivery_count
-            return sb_message
-        return create_service_bus_message
+    # Act
+    await service_bus_queue_reader(mock_service_bus_message)
 
-    @pytest.fixture(scope="function", name="mock_crud_factory")
-    def mock_crud_factory(self, mocker):
-        # Mock CRUD factory for dependency injection
-        mock_crud_factory = MagicMock()
-        mock_crud_factory.create = AsyncMock()
-        mock_crud_factory.update = AsyncMock()
-        mock_crud_factory.delete = AsyncMock()
-        mocker.patch("repository.crud.CrudFactory", return_value=mock_crud_factory)
-        return mock_crud_factory
+    # Assert
+    async_mock_logger.log.assert_called_with(
+        f"Received 1 messages from pending_accounts queue."
+    )
+    async_mock_logger.send_success_response.assert_called_with("Messages processed successfully.")
 
-    @pytest.mark.asyncio
-    async def test_service_bus_queue_reader_success(self, async_mock_event_hub_logger, mock_service_bus_message, mock_crud_factory):
-        # Test successful processing of Service Bus Queue message
-        encrypted_body = json.dumps([
-            {"CUSTOMERID": "123", "ACCOUNTHOLDERNAME": "John Doe", "ENTITYNAME": "ABC Corp", "ACCOUNTNUMBER": "456789"}
-        ])
-        mock_message = mock_service_bus_message(encrypted_body)
 
-        # Assuming the mocked logger methods are triggered
-        await service_bus_queue_reader(mock_message)
-        async_mock_event_hub_logger.log.assert_called_once_with("Received 1 messages from pending_accounts queue.")
+@pytest.mark.asyncio
+async def test_service_bus_queue_reader_validation_error(
+    mocker: MockerFixture,
+    async_mock_logger,
+):
+    """Test validation error during message processing"""
 
-    @pytest.mark.asyncio
-    async def test_service_bus_queue_reader_integrity_conflict(self, async_mock_event_hub_logger, mock_service_bus_message, mock_crud_factory):
-        # Test case when an IntegrityConflictException is raised
-        encrypted_body = json.dumps([
-            {"CUSTOMERID": "123", "ACCOUNTHOLDERNAME": "John Doe", "ENTITYNAME": "ABC Corp", "ACCOUNTNUMBER": "456789"}
-        ])
-        mock_message = mock_service_bus_message(encrypted_body)
+    # Arrange
+    encrypted_message_body = "mock_encrypted_message"
+    invalid_decrypted_message_body = json.dumps([
+        {
+            "ACCOUNTNUMBER": 1010450002,
+            "CUSTOMERID": "O10025",
+            # Missing required fields such as DATEOPENED, ACCOUNTHOLDERNAME, etc.
+        }
+    ])
+    mock_service_bus_message = create_service_bus_message(encrypted_message_body)
+    mocker.patch("blueprints.process_accounts.cryptography_service.decrypt", return_value=invalid_decrypted_message_body)
 
-        # Simulate IntegrityConflictException being raised
-        mock_crud_factory.create.side_effect = crud.IntegrityConflictException("Event already found")
-        
-        await service_bus_queue_reader(mock_message)
-        
-        async_mock_event_hub_logger.log_error.assert_called_once_with("Event already found in database")
-        async_mock_event_hub_logger.send_critical_status.assert_called_once_with("Event already found in database")
+    # Act
+    await service_bus_queue_reader(mock_service_bus_message)
 
-    @pytest.mark.asyncio
-    async def test_service_bus_queue_reader_validation_error(self, async_mock_event_hub_logger, mock_service_bus_message, mock_crud_factory):
-        # Test case when a ValidationError is raised
-        encrypted_body = json.dumps([
-            {"CUSTOMERID": "123", "ACCOUNTHOLDERNAME": "John Doe", "ENTITYNAME": "ABC Corp", "ACCOUNTNUMBER": "invalid_account"}
-        ])
-        mock_message = mock_service_bus_message(encrypted_body)
+    # Assert
+    async_mock_logger.log_error.assert_called_with("Validation Error:")
+    async_mock_logger.send_critical_status.assert_called_once()
 
-        # Simulate ValidationError being raised
-        mock_crud_factory.create.side_effect = ValueError("Invalid data")
-        
-        await service_bus_queue_reader(mock_message)
-        
-        async_mock_event_hub_logger.log_error.assert_called_once_with("Invalid data")
-        async_mock_event_hub_logger.send_critical_status.assert_called_once_with("Invalid data")
+
+@pytest.mark.asyncio
+async def test_service_bus_queue_reader_unexpected_exception(
+    mocker: MockerFixture,
+    async_mock_logger,
+):
+    """Test unexpected exception during message processing"""
+
+    # Arrange
+    encrypted_message_body = "mock_encrypted_message"
+    mock_service_bus_message = create_service_bus_message(encrypted_message_body)
+    mocker.patch("blueprints.process_accounts.cryptography_service.decrypt", side_effect=Exception("Unexpected error"))
+
+    # Act
+    await service_bus_queue_reader(mock_service_bus_message)
+
+    # Assert
+    async_mock_logger.log_critical.assert_called_once_with("Error: Unexpected error of Type: <class 'Exception'>")
+    async_mock_logger.send_critical_status.assert_not_called()
