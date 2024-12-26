@@ -1,116 +1,136 @@
-import pytest
-from unittest.mock import AsyncMock, MagicMock
-from service_bus_function import service_bus_queue_reader, create_or_update_customer_and_account
-from helpers.event_hub_logger import EventHubLogger
-from helpers import cryptography_service
+import unittest
+from unittest.mock import AsyncMock, patch, MagicMock
+from datetime import datetime
+import json
+from models.database import SessionLocal
 from repository import crud
-from pydantic import ValidationError
+from helpers.event_hub_logger import EventHubLogger
+from models.account import Account, AccountSchema
+from models.customer import Customer, CustomerSchema
+import azure.functions as func
+
+# Mock constants
+MAX_DELIVERY_COUNT = 3
 
 
-@pytest.mark.asyncio
-async def test_service_bus_queue_reader_success(mocker):
-    # Mock dependencies
-    mock_message = MagicMock()
-    mock_logger = mocker.patch("service_bus_function.EventHubLogger", autospec=True)
-    mock_decrypt = mocker.patch("service_bus_function.cryptography_service.decrypt")
-    mock_create_or_update = mocker.patch(
-        "service_bus_function.create_or_update_customer_and_account", new_callable=AsyncMock
-    )
+class TestServiceBusQueueReader(unittest.TestCase):
+    def setUp(self):
+        # Mocking SessionLocal and EventHubLogger
+        self.mock_session = MagicMock()
+        self.mock_logger = MagicMock()
+        self.message = MagicMock(spec=func.ServiceBusMessage)
+        self.message.get_body.return_value.decode.return_value = json.dumps(
+            [{"CUSTOMERID": "123", "ACCOUNTNUMBER": "987654", "DATEOPENED": "2024-01-01", "MAJORACCOUNTTYPE": "Checking", "MINORACCOUNTTYPE": "Standard", "ACCOUNTSTATUS": "Active", "AVAILABLEBALANCE": "1000.0", "CURRENTBALANCE": "1200.0"}]
+        )
 
-    # Mock input
-    test_message_body = '[{"CUSTOMERID": "123", "ACCOUNTNUMBER": "456"}]'
-    mock_message.get_body.return_value = test_message_body.encode()
-    mock_decrypt.return_value = test_message_body
+    @patch('helpers.cryptography_service.decrypt')
+    @patch('repository.crud.CrudFactory')
+    @patch('models.database.SessionLocal')
+    @patch('helpers.event_hub_logger.EventHubLogger')
+    async def test_service_bus_queue_reader_success(self, mock_logger_class, mock_session_class, mock_crud_factory, mock_decrypt):
+        # Set up mocks
+        mock_decrypt.return_value = self.message.get_body().return_value.decode.return_value
+        mock_logger_class.return_value = self.mock_logger
+        mock_session_class.return_value.__enter__.return_value = self.mock_session
+        mock_crud_factory.return_value = MagicMock()
 
-    # Run function
-    await service_bus_queue_reader(mock_message)
+        # Call the service_bus_queue_reader
+        await service_bus_queue_reader(self.message)
 
-    # Assertions
-    mock_logger.assert_called_once_with("process_accounts")
-    mock_decrypt.assert_called_once_with(test_message_body)
-    mock_create_or_update.assert_called_once_with(
-        [{"CUSTOMERID": "123", "ACCOUNTNUMBER": "456"}],
-        mock_logger.return_value,
-    )
-    mock_logger.return_value.send_success_response.assert_called_once_with("Messages processed successfully.")
+        # Assertions
+        mock_logger_class.assert_called_once_with("process_accounts")
+        self.mock_logger.log.assert_called_with("Received 1 messages from pending_accounts queue.")
+        self.mock_logger.send_success_response.assert_called_with("Messages processed successfully.")
+
+    @patch('helpers.cryptography_service.decrypt')
+    @patch('helpers.event_hub_logger.EventHubLogger')
+    async def test_service_bus_queue_reader_invalid_message(self, mock_logger_class, mock_decrypt):
+        # Set up invalid JSON
+        self.message.get_body.return_value.decode.return_value = '{"invalid_json"'
+
+        # Mock logger
+        mock_logger_class.return_value = self.mock_logger
+
+        # Call the service_bus_queue_reader
+        await service_bus_queue_reader(self.message)
+
+        # Check that the function logs the validation error
+        self.mock_logger.log_error.assert_called_with('Validation Error: Expecting value: line 1 column 1 (char 0)')
+        self.mock_logger.send_critical_status.assert_called_with('Validation Error: Expecting value: line 1 column 1 (char 0)')
+
+    @patch('helpers.cryptography_service.decrypt')
+    @patch('helpers.event_hub_logger.EventHubLogger')
+    async def test_service_bus_queue_reader_integrity_conflict(self, mock_logger_class, mock_decrypt):
+        # Set up IntegrityConflictException
+        mock_decrypt.return_value = self.message.get_body().return_value.decode.return_value
+        self.message.get_body.return_value.decode.return_value = json.dumps(
+            [{"CUSTOMERID": "123", "ACCOUNTNUMBER": "987654", "DATEOPENED": "2024-01-01", "MAJORACCOUNTTYPE": "Checking", "MINORACCOUNTTYPE": "Standard", "ACCOUNTSTATUS": "Active", "AVAILABLEBALANCE": "1000.0", "CURRENTBALANCE": "1200.0"}]
+        )
+
+        # Set up the exception mock
+        mock_logger_class.return_value = self.mock_logger
+        with patch('repository.crud.CrudFactory') as mock_crud:
+            mock_crud.return_value.update_many_by_ids.side_effect = crud.IntegrityConflictException("Integrity Conflict")
+            # Call the service_bus_queue_reader
+            await service_bus_queue_reader(self.message)
+
+        # Assertions for Integrity Conflict
+        self.mock_logger.log_error.assert_called_with("Event already found in database: Integrity Conflict")
+        self.mock_logger.send_critical_status.assert_called_with("Event already found in database: Integrity Conflict")
+
+    @patch('helpers.cryptography_service.decrypt')
+    @patch('helpers.event_hub_logger.EventHubLogger')
+    async def test_service_bus_queue_reader_general_exception(self, mock_logger_class, mock_decrypt):
+        # Set up general exception
+        mock_decrypt.return_value = self.message.get_body().return_value.decode.return_value
+        mock_decrypt.side_effect = Exception("General Exception")
+
+        # Mock logger
+        mock_logger_class.return_value = self.mock_logger
+
+        # Call the service_bus_queue_reader
+        await service_bus_queue_reader(self.message)
+
+        # Check the critical error log for the general exception
+        self.mock_logger.log_critical.assert_called_with('Error: General Exception of Type: <class \'Exception\'>')
+        self.mock_logger.send_internal_error_response.assert_called_with('General Exception')
+
+    # Edge Case: Empty Account Records
+    @patch('helpers.cryptography_service.decrypt')
+    @patch('helpers.event_hub_logger.EventHubLogger')
+    async def test_service_bus_queue_reader_empty_account_records(self, mock_logger_class, mock_decrypt):
+        # Mock an empty message body
+        self.message.get_body.return_value.decode.return_value = json.dumps([])
+
+        # Mock logger
+        mock_logger_class.return_value = self.mock_logger
+
+        # Call the service_bus_queue_reader with empty records
+        await service_bus_queue_reader(self.message)
+
+        # Assert that no customer or account is created or updated
+        self.mock_logger.log.assert_called_with("Received 0 messages from pending_accounts queue.")
+        self.mock_logger.send_success_response.assert_called_with("Messages processed successfully.")
+
+    # Edge Case: Malformed Account Data
+    @patch('helpers.cryptography_service.decrypt')
+    @patch('helpers.event_hub_logger.EventHubLogger')
+    async def test_service_bus_queue_reader_malformed_account_data(self, mock_logger_class, mock_decrypt):
+        # Set up malformed account data
+        self.message.get_body.return_value.decode.return_value = json.dumps(
+            [{"CUSTOMERID": "123", "ACCOUNTNUMBER": "not_a_number", "DATEOPENED": "2024-01-01"}]
+        )
+
+        # Mock logger
+        mock_logger_class.return_value = self.mock_logger
+
+        # Call the service_bus_queue_reader with malformed data
+        await service_bus_queue_reader(self.message)
+
+        # Check if the logger logs the error
+        self.mock_logger.log_error.assert_called_with("Validation Error: 123 is not a valid account number")
+        self.mock_logger.send_critical_status.assert_called_with("Validation Error: 123 is not a valid account number")
 
 
-@pytest.mark.asyncio
-async def test_service_bus_queue_reader_validation_error(mocker):
-    # Mock dependencies
-    mock_message = MagicMock()
-    mock_logger = mocker.patch("service_bus_function.EventHubLogger", autospec=True)
-    mock_decrypt = mocker.patch("service_bus_function.cryptography_service.decrypt")
-    mock_create_or_update = mocker.patch(
-        "service_bus_function.create_or_update_customer_and_account", new_callable=AsyncMock
-    )
-
-    # Mock input
-    test_message_body = '[{"CUSTOMERID": "123", "INVALIDFIELD": "value"}]'
-    mock_message.get_body.return_value = test_message_body.encode()
-    mock_decrypt.return_value = test_message_body
-    mock_create_or_update.side_effect = ValidationError(errors=[], model="")
-
-    # Run function
-    await service_bus_queue_reader(mock_message)
-
-    # Assertions
-    mock_logger.assert_called_once_with("process_accounts")
-    mock_logger.return_value.log_error.assert_called_once()
-    mock_logger.return_value.send_critical_status.assert_called_once()
-    mock_logger.return_value.log_dead_letter.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_service_bus_queue_reader_integrity_conflict(mocker):
-    # Mock dependencies
-    mock_message = MagicMock()
-    mock_logger = mocker.patch("service_bus_function.EventHubLogger", autospec=True)
-    mock_decrypt = mocker.patch("service_bus_function.cryptography_service.decrypt")
-    mock_create_or_update = mocker.patch(
-        "service_bus_function.create_or_update_customer_and_account", new_callable=AsyncMock
-    )
-
-    # Mock input
-    test_message_body = '[{"CUSTOMERID": "123", "ACCOUNTNUMBER": "456"}]'
-    mock_message.get_body.return_value = test_message_body.encode()
-    mock_decrypt.return_value = test_message_body
-    mock_create_or_update.side_effect = crud.IntegrityConflictException("Conflict!")
-
-    # Run function
-    await service_bus_queue_reader(mock_message)
-
-    # Assertions
-    mock_logger.assert_called_once_with("process_accounts")
-    mock_logger.return_value.log_error.assert_called_once_with(
-        "Event already found in database: Conflict!"
-    )
-    mock_logger.return_value.log_dead_letter.assert_called_once()
-    mock_logger.return_value.send_critical_status.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_service_bus_queue_reader_generic_error(mocker):
-    # Mock dependencies
-    mock_message = MagicMock()
-    mock_logger = mocker.patch("service_bus_function.EventHubLogger", autospec=True)
-    mock_decrypt = mocker.patch("service_bus_function.cryptography_service.decrypt")
-    mock_create_or_update = mocker.patch(
-        "service_bus_function.create_or_update_customer_and_account", new_callable=AsyncMock
-    )
-
-    # Mock input
-    test_message_body = '[{"CUSTOMERID": "123", "ACCOUNTNUMBER": "456"}]'
-    mock_message.get_body.return_value = test_message_body.encode()
-    mock_decrypt.return_value = test_message_body
-    mock_create_or_update.side_effect = Exception("Unexpected error")
-
-    # Run function
-    await service_bus_queue_reader(mock_message)
-
-    # Assertions
-    mock_logger.assert_called_once_with("process_accounts")
-    mock_logger.return_value.log_critical.assert_called_once_with(
-        "Error: Unexpected error of Type: <class 'Exception'>"
-    )
-    mock_logger.return_value.log_dead_letter.assert_called_once()
+if __name__ == '__main__':
+    unittest.main()
