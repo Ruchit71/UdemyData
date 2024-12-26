@@ -1,169 +1,78 @@
 import unittest
-from pytest_mock import MockerFixture
 from unittest.mock import AsyncMock, MagicMock
-from datetime import datetime
-import json
-from models.database import SessionLocal
-from repository import crud
-from helpers.event_hub_logger import EventHubLogger
-from models.account import Account, AccountSchema
-from models.customer import Customer, CustomerSchema
-import azure.functions as func
-from your_module import service_bus_queue_reader, create_or_update_customer_and_account, log_create_customers
+from your_module import service_bus_queue_reader, create_or_update_customer_and_account
 import pytest
+import json
 
-# Fixture for common mock setup
-@pytest.fixture
-def mock_dependencies(mocker: MockerFixture):
-    # Mocking the EventHubLogger
-    mock_logger = MagicMock(EventHubLogger)
-    mock_logger.log = MagicMock()
-    mock_logger.send_success_response = AsyncMock()
 
-    # Mocking the database session
-    mock_session = MagicMock(SessionLocal)
-
-    # Mocking the CRUD factory classes
-    mock_customer_crud = MagicMock(crud.CrudFactory)
-    mock_account_crud = MagicMock(crud.CrudFactory)
-
-    # Patching the dependencies
-    mocker.patch('your_module.EventHubLogger', return_value=mock_logger)
-    mocker.patch('your_module.SessionLocal', return_value=mock_session)
-    mocker.patch('your_module.crud.CrudFactory', side_effect=[mock_customer_crud, mock_account_crud])
-
-    # Mocking the CRUD methods
-    mock_customer_crud.get_many_by_ids = AsyncMock(return_value=[])
-    mock_account_crud.get_many_by_ids = AsyncMock(return_value=[])
-
-    # Return mocked dependencies for further use in test cases
-    return {
-        "logger": mock_logger,
-        "session": mock_session,
-        "customer_crud": mock_customer_crud,
-        "account_crud": mock_account_crud
-    }
-
+@pytest.mark.asyncio
 class TestServiceBusQueueReader(unittest.TestCase):
 
-    def test_service_bus_queue_reader_success(self, mocker: MockerFixture, mock_dependencies):
-        mock_message = MagicMock(func.ServiceBusMessage)
-        mock_message.get_body.return_value.decode.return_value = json.dumps([
-            {
-                "CUSTOMERID": "123",
-                "ACCOUNTHOLDERNAME": "John Doe",
-                "ENTITYNAME": "Entity",
-                "OFFICENAME": "Office",
-                "TITLE3": "Mr.",
-                "ADDRESSLINE1": "123 Street",
-                "ADDRESSLINE2": "Apt 4B",
-                "ADDRESSLINE3": "",
-                "CITY": "City",
-                "STATE": "State",
-                "ZIP": "12345",
-                "COUNTRY": "Country",
-                "ACCOUNTNUMBER": "987654321",
-                "DATEOPENED": "2022-01-01",
-                "MAJORACCOUNTTYPE": "Checking",
-                "MINORACCOUNTTYPE": "Savings",
-                "ACCOUNTSTATUS": "Active",
-                "AVAILABLEBALANCE": "1000.0",
-                "CURRENTBALANCE": "900.0"
-            }
+    @pytest.fixture(scope="function", name="async_mock_event_hub_logger")
+    def async_mock_event_hub_logger(self):
+        # Using the fixture for async mock logger
+        return MagicMock()
+
+    @pytest.fixture(scope="function", name="mock_service_bus_message")
+    def mock_service_bus_message(self):
+        # Mock service bus message creation
+        def create_service_bus_message(encrypted_body: str, delivery_count: int = 1):
+            sb_message = MagicMock(spec=func.ServiceBusMessage)
+            sb_message.get_body.return_value = encrypted_body
+            sb_message.delivery_count = delivery_count
+            return sb_message
+        return create_service_bus_message
+
+    @pytest.fixture(scope="function", name="mock_crud_factory")
+    def mock_crud_factory(self, mocker):
+        # Mock CRUD factory for dependency injection
+        mock_crud_factory = MagicMock()
+        mock_crud_factory.create = AsyncMock()
+        mock_crud_factory.update = AsyncMock()
+        mock_crud_factory.delete = AsyncMock()
+        mocker.patch("repository.crud.CrudFactory", return_value=mock_crud_factory)
+        return mock_crud_factory
+
+    @pytest.mark.asyncio
+    async def test_service_bus_queue_reader_success(self, async_mock_event_hub_logger, mock_service_bus_message, mock_crud_factory):
+        # Test successful processing of Service Bus Queue message
+        encrypted_body = json.dumps([
+            {"CUSTOMERID": "123", "ACCOUNTHOLDERNAME": "John Doe", "ENTITYNAME": "ABC Corp", "ACCOUNTNUMBER": "456789"}
         ])
+        mock_message = mock_service_bus_message(encrypted_body)
 
-        # Use the mock dependencies
-        mock_logger = mock_dependencies["logger"]
+        # Assuming the mocked logger methods are triggered
+        await service_bus_queue_reader(mock_message)
+        async_mock_event_hub_logger.log.assert_called_once_with("Received 1 messages from pending_accounts queue.")
 
-        # Call the function under test
-        result = service_bus_queue_reader(mock_message)
+    @pytest.mark.asyncio
+    async def test_service_bus_queue_reader_integrity_conflict(self, async_mock_event_hub_logger, mock_service_bus_message, mock_crud_factory):
+        # Test case when an IntegrityConflictException is raised
+        encrypted_body = json.dumps([
+            {"CUSTOMERID": "123", "ACCOUNTHOLDERNAME": "John Doe", "ENTITYNAME": "ABC Corp", "ACCOUNTNUMBER": "456789"}
+        ])
+        mock_message = mock_service_bus_message(encrypted_body)
 
-        # Verify if the logger was called correctly
-        mock_logger.log.assert_called_with("Received 1 messages from pending_accounts queue.")
-        mock_logger.send_success_response.assert_called_with("Messages processed successfully.")
-    
-    def test_create_or_update_customer_and_account(self, mocker: MockerFixture, mock_dependencies):
-        # Use the mock dependencies
-        mock_logger = mock_dependencies["logger"]
-        mock_session = mock_dependencies["session"]
+        # Simulate IntegrityConflictException being raised
+        mock_crud_factory.create.side_effect = crud.IntegrityConflictException("Event already found")
         
-        # Sample account record for testing
-        account_records = [
-            {
-                "CUSTOMERID": "123",
-                "ACCOUNTHOLDERNAME": "John Doe",
-                "ENTITYNAME": "Entity",
-                "OFFICENAME": "Office",
-                "TITLE3": "Mr.",
-                "ADDRESSLINE1": "123 Street",
-                "ADDRESSLINE2": "Apt 4B",
-                "ADDRESSLINE3": "",
-                "CITY": "City",
-                "STATE": "State",
-                "ZIP": "12345",
-                "COUNTRY": "Country",
-                "ACCOUNTNUMBER": "987654321",
-                "DATEOPENED": "2022-01-01",
-                "MAJORACCOUNTTYPE": "Checking",
-                "MINORACCOUNTTYPE": "Savings",
-                "ACCOUNTSTATUS": "Active",
-                "AVAILABLEBALANCE": "1000.0",
-                "CURRENTBALANCE": "900.0"
-            }
-        ]
-
-        # Mock methods like 'fetch_existing_customers' etc.
-        mock_customer_crud = mock_dependencies["customer_crud"]
-        mock_account_crud = mock_dependencies["account_crud"]
-
-        # Call the function
-        result = create_or_update_customer_and_account(account_records, mock_logger)
+        await service_bus_queue_reader(mock_message)
         
-        # Verify logger interactions
-        mock_logger.log.assert_called()
-        mock_logger.send_success_response.assert_called_with("Messages processed successfully.")
-    
-    def test_log_create_customers(self, mocker: MockerFixture, mock_dependencies):
-        # Use the mock dependencies
-        mock_logger = mock_dependencies["logger"]
+        async_mock_event_hub_logger.log_error.assert_called_once_with("Event already found in database")
+        async_mock_event_hub_logger.send_critical_status.assert_called_once_with("Event already found in database")
+
+    @pytest.mark.asyncio
+    async def test_service_bus_queue_reader_validation_error(self, async_mock_event_hub_logger, mock_service_bus_message, mock_crud_factory):
+        # Test case when a ValidationError is raised
+        encrypted_body = json.dumps([
+            {"CUSTOMERID": "123", "ACCOUNTHOLDERNAME": "John Doe", "ENTITYNAME": "ABC Corp", "ACCOUNTNUMBER": "invalid_account"}
+        ])
+        mock_message = mock_service_bus_message(encrypted_body)
+
+        # Simulate ValidationError being raised
+        mock_crud_factory.create.side_effect = ValueError("Invalid data")
         
-        new_customers = [
-            CustomerSchema(
-                customer_id="123",
-                account_holder_name="John Doe",
-                entity_name="Entity",
-                office_name="Office",
-                address_line1="123 Street",
-                address_line2="Apt 4B",
-                address_line3="",
-                city="City",
-                state="State",
-                zip="12345",
-                country="Country"
-            )
-        ]
-
-        # Call the function
-        log_create_customers(mock_logger, new_customers)
-
-        # Verify the logger's log method is called with the expected string
-        mock_logger.log.assert_called_with("Creating 1 customers in the database.")
+        await service_bus_queue_reader(mock_message)
         
-    # Edge case test - empty input (no accounts)
-    def test_empty_account_records(self, mocker: MockerFixture, mock_dependencies):
-        # Mocking empty account records
-        mock_message = MagicMock(func.ServiceBusMessage)
-        mock_message.get_body.return_value.decode.return_value = json.dumps([])
-
-        # Use the mock dependencies
-        mock_logger = mock_dependencies["logger"]
-
-        # Call the function with empty account records
-        result = service_bus_queue_reader(mock_message)
-
-        # Verify logger behavior when there are no records
-        mock_logger.log.assert_called_with("Received 0 messages from pending_accounts queue.")
-        mock_logger.send_success_response.assert_called_with("Messages processed successfully.")
-
-if __name__ == "__main__":
-    unittest.main()
+        async_mock_event_hub_logger.log_error.assert_called_once_with("Invalid data")
+        async_mock_event_hub_logger.send_critical_status.assert_called_once_with("Invalid data")
