@@ -1,257 +1,116 @@
-import json
-import os
-from datetime import datetime
-from typing import List, Dict, Tuple
-
-import azure.functions as func
-from helpers import cryptography_service
+import pytest
+from unittest.mock import AsyncMock, MagicMock
+from service_bus_function import service_bus_queue_reader, create_or_update_customer_and_account
 from helpers.event_hub_logger import EventHubLogger
-from models.database import SessionLocal
+from helpers import cryptography_service
 from repository import crud
-from models.account import Account, AccountSchema
-from models.customer import Customer, CustomerSchema
-
-service_bus_queue_blueprint = func.Blueprint()
+from pydantic import ValidationError
 
 
-@service_bus_queue_blueprint.function_name(name="ServiceBusQueueTrigger")
-@service_bus_queue_blueprint.service_bus_queue_trigger(
-    arg_name="message",
-    queue_name=os.environ["PENDING_ACCOUNTS"],
-    connection="RTB_SB_CONNECTION_STRING",
-)
-async def service_bus_queue_reader(message: func.ServiceBusMessage):
-    """
-    Azure Function to process Service Bus queue messages for account updates.
+@pytest.mark.asyncio
+async def test_service_bus_queue_reader_success(mocker):
+    # Mock dependencies
+    mock_message = MagicMock()
+    mock_logger = mocker.patch("service_bus_function.EventHubLogger", autospec=True)
+    mock_decrypt = mocker.patch("service_bus_function.cryptography_service.decrypt")
+    mock_create_or_update = mocker.patch(
+        "service_bus_function.create_or_update_customer_and_account", new_callable=AsyncMock
+    )
 
-    Args:
-        message (func.ServiceBusMessage): The Service Bus message received from the queue.
-    """
-    logger = EventHubLogger("process_accounts")
-    try:
-        message_body = message.get_body().decode("utf-8")
-        accounts: List[Dict] = json.loads(cryptography_service.decrypt(message_body))
-        await create_or_update_customer_and_account(accounts, logger)
-    except Exception as ex:
-        exception_message = f"Error: {ex} of Type: {type(ex)}"
-        logger.log_critical(exception_message)
-        return await logger.send_internal_error_response(f"{ex}")
+    # Mock input
+    test_message_body = '[{"CUSTOMERID": "123", "ACCOUNTNUMBER": "456"}]'
+    mock_message.get_body.return_value = test_message_body.encode()
+    mock_decrypt.return_value = test_message_body
 
+    # Run function
+    await service_bus_queue_reader(mock_message)
 
-async def create_or_update_customer_and_account(data: List[Dict], logger: EventHubLogger):
-    """
-    Creates or updates customers and their associated accounts.
-
-    Args:
-        data (List[Dict]): List of dictionaries containing customer and account data.
-        logger (EventHubLogger): Logger instance for logging events.
-    """
-    CustomerCrud = crud.CrudFactory(Customer)
-    AccountCrud = crud.CrudFactory(Account)
-
-    async with SessionLocal() as session:
-        existing_customers = await fetch_existing_customers(data, CustomerCrud, session)
-        customer_updates, new_customers = process_customer_data(data, existing_customers)
-
-        await update_customers(customer_updates, CustomerCrud)
-        await create_new_customers(new_customers, CustomerCrud)
-
-        customer_uuid_map = await fetch_customer_uuid_map(data, CustomerCrud, session)
-
-        existing_accounts = await fetch_existing_accounts(data, AccountCrud, session)
-        account_updates, new_accounts = process_account_data(data, existing_accounts, customer_uuid_map)
-
-        await update_accounts(account_updates, AccountCrud)
-        await create_new_accounts(new_accounts, AccountCrud)
+    # Assertions
+    mock_logger.assert_called_once_with("process_accounts")
+    mock_decrypt.assert_called_once_with(test_message_body)
+    mock_create_or_update.assert_called_once_with(
+        [{"CUSTOMERID": "123", "ACCOUNTNUMBER": "456"}],
+        mock_logger.return_value,
+    )
+    mock_logger.return_value.send_success_response.assert_called_once_with("Messages processed successfully.")
 
 
-async def fetch_existing_customers(data: List[Dict], CustomerCrud, session) -> Dict[str, Customer]:
-    """
-    Fetches existing customers from the database.
+@pytest.mark.asyncio
+async def test_service_bus_queue_reader_validation_error(mocker):
+    # Mock dependencies
+    mock_message = MagicMock()
+    mock_logger = mocker.patch("service_bus_function.EventHubLogger", autospec=True)
+    mock_decrypt = mocker.patch("service_bus_function.cryptography_service.decrypt")
+    mock_create_or_update = mocker.patch(
+        "service_bus_function.create_or_update_customer_and_account", new_callable=AsyncMock
+    )
 
-    Args:
-        data (List[Dict]): List of dictionaries containing customer data.
-        CustomerCrud: CRUD instance for customer operations.
-        session: Database session.
+    # Mock input
+    test_message_body = '[{"CUSTOMERID": "123", "INVALIDFIELD": "value"}]'
+    mock_message.get_body.return_value = test_message_body.encode()
+    mock_decrypt.return_value = test_message_body
+    mock_create_or_update.side_effect = ValidationError(errors=[], model="")
 
-    Returns:
-        Dict[str, Customer]: Mapping of customer IDs to Customer objects.
-    """
-    customer_ids = [entry["CUSTOMERID"] for entry in data]
-    existing_customers = await CustomerCrud.get_many_by_ids(session, ids=customer_ids, column="customer_id")
-    return {customer.customer_id: customer for customer in existing_customers}
+    # Run function
+    await service_bus_queue_reader(mock_message)
 
-
-def process_customer_data(data: List[Dict], existing_customers: Dict[str, Customer]) -> Tuple[Dict[str, CustomerSchema], List[CustomerSchema]]:
-    """
-    Processes customer data to determine updates and new entries.
-
-    Args:
-        data (List[Dict]): List of dictionaries containing customer data.
-        existing_customers (Dict[str, Customer]): Mapping of existing customer IDs to Customer objects.
-
-    Returns:
-        Tuple[Dict[str, CustomerSchema], List[CustomerSchema]]: 
-            - Dictionary of updates for existing customers.
-            - List of schemas for new customers.
-    """
-    customer_updates = {}
-    new_customers = []
-
-    for entry in data:
-        customer_schema = CustomerSchema(
-            customer_id=entry["CUSTOMERID"],
-            account_holder_name=entry["ACCOUNTHOLDERNAME"],
-            entity_name=entry["ENTITYNAME"],
-            office_name=entry["OFFICENAME"],
-            title3=entry["TITLE3"],
-            address_line1=entry["ADDRESSLINE1"],
-            address_line2=entry["ADDRESSLINE2"],
-            address_line3=entry["ADDRESSLINE3"],
-            city=entry["CITY"],
-            state=entry["STATE"],
-            zip=entry["ZIP"],
-            country=entry["COUNTRY"],
-        )
-        if entry["CUSTOMERID"] in existing_customers:
-            customer = existing_customers[entry["CUSTOMERID"]]
-            updated_customer_data = {
-                key: value
-                for key, value in customer_schema.dict().items()
-                if key not in ["created_at", "updated_at", "uuid"]
-            }
-            existing_data = {
-                field: getattr(customer, field)
-                for field in updated_customer_data.keys()
-                if hasattr(customer, field)
-            }
-            if existing_data != updated_customer_data:
-                customer_updates[customer.uuid] = customer_schema
-        else:
-            new_customers.append(customer_schema)
-
-    return customer_updates, new_customers
+    # Assertions
+    mock_logger.assert_called_once_with("process_accounts")
+    mock_logger.return_value.log_error.assert_called_once()
+    mock_logger.return_value.send_critical_status.assert_called_once()
+    mock_logger.return_value.log_dead_letter.assert_called_once()
 
 
-async def update_customers(customer_updates: Dict[str, CustomerSchema], CustomerCrud):
-    """
-    Updates existing customers in the database.
+@pytest.mark.asyncio
+async def test_service_bus_queue_reader_integrity_conflict(mocker):
+    # Mock dependencies
+    mock_message = MagicMock()
+    mock_logger = mocker.patch("service_bus_function.EventHubLogger", autospec=True)
+    mock_decrypt = mocker.patch("service_bus_function.cryptography_service.decrypt")
+    mock_create_or_update = mocker.patch(
+        "service_bus_function.create_or_update_customer_and_account", new_callable=AsyncMock
+    )
 
-    Args:
-        customer_updates (Dict[str, CustomerSchema]): Mapping of customer UUIDs to updated schemas.
-        CustomerCrud: CRUD instance for customer operations.
-    """
-    if customer_updates:
-        async with SessionLocal() as session:
-            await CustomerCrud.update_many_by_ids(session, customer_updates, "uuid")
+    # Mock input
+    test_message_body = '[{"CUSTOMERID": "123", "ACCOUNTNUMBER": "456"}]'
+    mock_message.get_body.return_value = test_message_body.encode()
+    mock_decrypt.return_value = test_message_body
+    mock_create_or_update.side_effect = crud.IntegrityConflictException("Conflict!")
 
+    # Run function
+    await service_bus_queue_reader(mock_message)
 
-async def create_new_customers(new_customers: List[CustomerSchema], CustomerCrud):
-    """
-    Creates new customers in the database.
-
-    Args:
-        new_customers (List[CustomerSchema]): List of customer schemas to create.
-        CustomerCrud: CRUD instance for customer operations.
-    """
-    if new_customers:
-        async with SessionLocal() as session:
-            await CustomerCrud.create_many(session, new_customers)
-
-
-async def fetch_customer_uuid_map(data: List[Dict], CustomerCrud, session) -> Dict[str, str]:
-    """
-    Fetches a mapping of customer IDs to UUIDs.
-
-    Args:
-        data (List[Dict]): List of dictionaries containing customer data.
-        CustomerCrud: CRUD instance for customer operations.
-        session: Database session.
-
-    Returns:
-        Dict[str, str]: Mapping of customer IDs to UUIDs.
-    """
-    customer_ids = [entry["CUSTOMERID"] for entry in data]
-    updated_customers = await CustomerCrud.get_many_by_ids(session, ids=customer_ids, column="customer_id")
-    return {customer.customer_id: customer.uuid for customer in updated_customers}
+    # Assertions
+    mock_logger.assert_called_once_with("process_accounts")
+    mock_logger.return_value.log_error.assert_called_once_with(
+        "Event already found in database: Conflict!"
+    )
+    mock_logger.return_value.log_dead_letter.assert_called_once()
+    mock_logger.return_value.send_critical_status.assert_called_once()
 
 
-async def fetch_existing_accounts(data: List[Dict], AccountCrud, session) -> Dict[str, Account]:
-    """
-    Fetches existing accounts from the database.
+@pytest.mark.asyncio
+async def test_service_bus_queue_reader_generic_error(mocker):
+    # Mock dependencies
+    mock_message = MagicMock()
+    mock_logger = mocker.patch("service_bus_function.EventHubLogger", autospec=True)
+    mock_decrypt = mocker.patch("service_bus_function.cryptography_service.decrypt")
+    mock_create_or_update = mocker.patch(
+        "service_bus_function.create_or_update_customer_and_account", new_callable=AsyncMock
+    )
 
-    Args:
-        data (List[Dict]): List of dictionaries containing account data.
-        AccountCrud: CRUD instance for account operations.
-        session: Database session.
+    # Mock input
+    test_message_body = '[{"CUSTOMERID": "123", "ACCOUNTNUMBER": "456"}]'
+    mock_message.get_body.return_value = test_message_body.encode()
+    mock_decrypt.return_value = test_message_body
+    mock_create_or_update.side_effect = Exception("Unexpected error")
 
-    Returns:
-        Dict[str, Account]: Mapping of account numbers to Account objects.
-    """
-    account_numbers = [str(entry["ACCOUNTNUMBER"]) for entry in data]
-    existing_accounts = await AccountCrud.get_many_by_ids(session, ids=account_numbers, column="account_number")
-    return {account.account_number: account for account in existing_accounts}
+    # Run function
+    await service_bus_queue_reader(mock_message)
 
-
-def process_account_data(data: List[Dict], existing_accounts: Dict[str, Account], customer_uuid_map: Dict[str, str]) -> Tuple[Dict[str, AccountSchema], List[AccountSchema]]:
-    """
-    Processes account data to determine updates and new entries.
-
-    Args:
-        data (List[Dict]): List of dictionaries containing account data.
-        existing_accounts (Dict[str, Account]): Mapping of existing account numbers to Account objects.
-        customer_uuid_map (Dict[str, str]): Mapping of customer IDs to UUIDs.
-
-    Returns:
-        Tuple[Dict[str, AccountSchema], List[AccountSchema]]: 
-            - Dictionary of updates for existing accounts.
-            - List of schemas for new accounts.
-    """
-    account_updates = {}
-    new_accounts = []
-
-    for entry in data:
-        account_schema = AccountSchema(
-            customer_uuid=customer_uuid_map[entry["CUSTOMERID"]],
-            account_number=str(entry["ACCOUNTNUMBER"]),
-            date_opened=datetime.strptime(entry["DATEOPENED"], "%Y-%m-%d"),
-            major_account_type=entry["MAJORACCOUNTTYPE"],
-            minor_account_type=entry["MINORACCOUNTTYPE"],
-            account_status=entry["ACCOUNTSTATUS"],
-            available_balance=float(entry["AVAILABLEBALANCE"]),
-            current_balance=float(entry["CURRENTBALANCE"]),
-        )
-
-        if str(entry["ACCOUNTNUMBER"]) in existing_accounts:
-            account = existing_accounts[str(entry["ACCOUNTNUMBER"])]
-            account_updates[account.uuid] = account_schema
-        else:
-            new_accounts.append(account_schema)
-
-    return account_updates, new_accounts
-
-
-async def update_accounts(account_updates: Dict[str, AccountSchema], AccountCrud):
-    """
-    Updates existing accounts in the database.
-
-    Args:
-        account_updates (Dict[str, AccountSchema]): Mapping of account UUIDs to updated schemas.
-        AccountCrud: CRUD instance for account operations.
-    """
-    if account_updates:
-        async with SessionLocal() as session:
-            await AccountCrud.update_many_by_ids(session, account_updates, "uuid")
-
-
-async def create_new_accounts(new_accounts: List[AccountSchema], AccountCrud):
-    """
-    Creates new accounts in the database.
-
-    Args:
-        new_accounts (List[AccountSchema]): List of account schemas to create.
-        AccountCrud: CRUD instance for account operations.
-    """
-    if new_accounts:
-        async with SessionLocal() as session:
-            await AccountCrud.create_many(session, new_accounts)
+    # Assertions
+    mock_logger.assert_called_once_with("process_accounts")
+    mock_logger.return_value.log_critical.assert_called_once_with(
+        "Error: Unexpected error of Type: <class 'Exception'>"
+    )
+    mock_logger.return_value.log_dead_letter.assert_called_once()
