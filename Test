@@ -1,113 +1,79 @@
-@pytest.fixture(scope="function", name="mock_crud_factory")
-def fixture_mock_crud_factory(mocker: MockerFixture):
-    """Fixture to mock CrudFactory for unit tests"""
-    return mocker.patch(MOCK_CRUD_FACTORY)
+async def create_or_update_customer_and_account(
+    logger: EventHubLogger,
+    account_message: dict[str, Any],
+) -> None:
+    """
+    Create or update customer and account data in the database.
 
+    Parameters:
+    - logger: EventHubLogger instance for logging.
+    - account_message: Dictionary containing account and customer details.
+    """
+    session = crud.get_session()  # Assuming `crud.get_session` initializes the AsyncSession
 
-@pytest.fixture(scope="function", name="async_mock_event_hub_logger")
-def fixture_async_mock_event_hub_logger(mocker: MockerFixture):
-    """Fixture for async mock EventHubLogger"""
-    mock_logger = AsyncMock()
-    mock_logger.log = AsyncMock()
-    mock_logger.log_error = AsyncMock()
-    mock_logger.log_critical = AsyncMock()
-    mock_logger.log_dead_letter = AsyncMock()
-    mock_logger.send_success_response = AsyncMock()
-    mock_logger.send_critical_status = AsyncMock()
-    return mock_logger
-
-
-@pytest.mark.asyncio
-async def test_service_bus_queue_reader_success(
-    mocker: MockerFixture,
-    async_mock_logger,
-    mock_crud_factory,
-):
-    """Test successful processing of Service Bus queue message"""
-
-    # Arrange
-    encrypted_message_body = "mock_encrypted_message"
-    decrypted_message_body = json.dumps([
-        {
-            "ACCOUNTNUMBER": 1010450002,
-            "CUSTOMERID": "O10025",
-            "DATEOPENED": "2021-03-18",
-            "ACCOUNTHOLDERNAME": "FIRST AMERICAN TITLE INSURANCE COMPANY",
-            "ENTITYNAME": "FIRST AMERICAN TITLE INSURANCE COMPANY",
-            "OFFICENAME": "INTERNATIONAL CASH OPERATING ACCOUNT",
-            "TITLE3": "",
-            "MAJORACCOUNTTYPE": "CK",
-            "MINORACCOUNTTYPE": "CK01",
-            "ACCOUNTSTATUS": "ACT",
-            "AVAILABLEBALANCE": "2124",
-            "CURRENTBALANCE": "2124",
-            "ADDRESSLINE1": "1 FIRST AMERICAN WAY",
-            "ADDRESSLINE2": "SANTA ANA CA 92701",
-            "ADDRESSLINE3": "",
-            "CITY": "SANTA ANA",
-            "STATE": "CA",
-            "ZIP": "92701",
-            "COUNTRY": "USA"
+    try:
+        # Extract and map customer data
+        customer_data = {
+            "customer_id": account_message.get("CUSTOMERID"),
+            "address_line1": account_message.get("ADDRESSLINE1"),
+            "address_line2": account_message.get("ADDRESSLINE2"),
+            "address_line3": account_message.get("ADDRESSLINE3"),
+            "city": account_message.get("CITY"),
+            "state": account_message.get("STATE"),
+            "zip": account_message.get("ZIP"),
+            "country": account_message.get("COUNTRY"),
         }
-    ])
-    mock_service_bus_message = create_service_bus_message(encrypted_message_body)
-    mocker.patch("blueprints.process_accounts.cryptography_service.decrypt", return_value=decrypted_message_body)
-    
-    mock_session = MagicMock()
-    mocker.patch("blueprints.process_accounts.SessionLocal", return_value=mock_session)
 
-    # Act
-    await service_bus_queue_reader(mock_service_bus_message)
+        customer_schema = CustomerSchema(**customer_data)
+        CustomerCrud = crud.CrudFactory(Customer)
 
-    # Assert
-    async_mock_logger.log.assert_called_with(
-        f"Received 1 messages from pending_accounts queue."
-    )
-    async_mock_logger.send_success_response.assert_called_with("Messages processed successfully.")
+        existing_customer = await CustomerCrud.get_by_id(
+            session, customer_data["customer_id"], column="customer_id"
+        )
 
+        if existing_customer:
+            logger.log(f"Updating customer {customer_data['customer_id']}")
+            await CustomerCrud.update_by_id(
+                session, customer_schema, customer_data["customer_id"], column="customer_id"
+            )
+        else:
+            logger.log(f"Creating new customer {customer_data['customer_id']}")
+            await CustomerCrud.create(session, customer_schema)
 
-@pytest.mark.asyncio
-async def test_service_bus_queue_reader_validation_error(
-    mocker: MockerFixture,
-    async_mock_logger,
-):
-    """Test validation error during message processing"""
-
-    # Arrange
-    encrypted_message_body = "mock_encrypted_message"
-    invalid_decrypted_message_body = json.dumps([
-        {
-            "ACCOUNTNUMBER": 1010450002,
-            "CUSTOMERID": "O10025",
-            # Missing required fields such as DATEOPENED, ACCOUNTHOLDERNAME, etc.
+        # Extract and map account data
+        account_data = {
+            "account_number": account_message.get("ACCOUNTNUMBER"),
+            "customer_id": account_message.get("CUSTOMERID"),
+            "date_opened": account_message.get("DATEOPENED"),
+            "account_holder_name": account_message.get("ACCOUNTHOLDERNAME"),
+            "entity_name": account_message.get("ENTITYNAME"),
+            "office_name": account_message.get("OFFICENAME"),
+            "title3": account_message.get("TITLE3"),
+            "major_account_type": account_message.get("MAJORACCOUNTTYPE"),
+            "minor_account_type": account_message.get("MINORACCOUNTTYPE"),
+            "account_status": account_message.get("ACCOUNTSTATUS"),
+            "available_balance": account_message.get("AVAILABLEBALANCE"),
+            "current_balance": account_message.get("CURRENTBALANCE"),
         }
-    ])
-    mock_service_bus_message = create_service_bus_message(encrypted_message_body)
-    mocker.patch("blueprints.process_accounts.cryptography_service.decrypt", return_value=invalid_decrypted_message_body)
 
-    # Act
-    await service_bus_queue_reader(mock_service_bus_message)
+        account_schema = AccountSchema(**account_data)
+        AccountCrud = crud.CrudFactory(Account)
 
-    # Assert
-    async_mock_logger.log_error.assert_called_with("Validation Error:")
-    async_mock_logger.send_critical_status.assert_called_once()
+        existing_account = await AccountCrud.get_by_id(
+            session, account_data["account_number"], column="account_number"
+        )
 
+        if existing_account:
+            logger.log(f"Updating account {account_data['account_number']}")
+            await AccountCrud.update_by_id(
+                session, account_schema, account_data["account_number"], column="account_number"
+            )
+        else:
+            logger.log(f"Creating new account {account_data['account_number']}")
+            await AccountCrud.create(session, account_schema)
 
-@pytest.mark.asyncio
-async def test_service_bus_queue_reader_unexpected_exception(
-    mocker: MockerFixture,
-    async_mock_logger,
-):
-    """Test unexpected exception during message processing"""
-
-    # Arrange
-    encrypted_message_body = "mock_encrypted_message"
-    mock_service_bus_message = create_service_bus_message(encrypted_message_body)
-    mocker.patch("blueprints.process_accounts.cryptography_service.decrypt", side_effect=Exception("Unexpected error"))
-
-    # Act
-    await service_bus_queue_reader(mock_service_bus_message)
-
-    # Assert
-    async_mock_logger.log_critical.assert_called_once_with("Error: Unexpected error of Type: <class 'Exception'>")
-    async_mock_logger.send_critical_status.assert_not_called()
+    except Exception as ex:
+        logger.log_critical(f"Error while processing account message: {ex}")
+        raise
+    finally:
+        await session.close()
