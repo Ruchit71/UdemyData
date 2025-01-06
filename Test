@@ -1,105 +1,200 @@
-#!/bin/env python
-"""Load test model"""
-import random
-from datetime import datetime, timedelta
+**Resiliency and Recovery Plan: Rebuilding Midas Shadowcore Infrastructure and Application**
 
-from locust import HttpUser, task, constant_throughput
+**Objective:**
+To rebuild the Midas Shadowcore infrastructure and application from scratch by the end of 2024, demonstrating the team’s capability to completely restore the systems if needed.
 
-from load_tests import constants, load_test_helper
+---
 
-class AccountLoadTest(HttpUser):
-    wait_time = constant_throughput(0.1)
+**Acceptance Criteria:**
 
-    host = constants.APIM_DEV_HOST_URL
+1. Complete application infrastructure teardown and rebuild.
+2. Completion of regression testing.
+3. Attachment of proof of application rebuild to the Jira story.
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.token = None
+---
 
-    def generate_payload(self, count=10000):
-        """
-        Generate a payload with `count` number of account records, where half are new and half are updates.
-        """
-        payload = []
-        existing_accounts = []
+**Scope and Exclusions:**
 
-        # Generate 5,000 new accounts
-        for i in range(count // 2):
-            account_number = random.randint(1000000000, 9999999999)
-            customer_id = f"O{random.randint(10000, 99999)}"
-            date_opened = (
-                datetime.now() - timedelta(days=random.randint(1, 5000))
-            ).strftime("%Y-%m-%d")
-            account_holder_name = f"Company {i}"
-            entity_name = f"Entity {i}"
-            office_name = f"Office {i}"
-            major_account_type = "CK"
-            minor_account_type = random.choice(["CK01", "CK08"])
-            account_status = random.choice(["ACT", "APPR", "IACT"])
-            available_balance = f"{random.uniform(0, 100000):.2f}"
-            current_balance = f"{random.uniform(0, 100000):.2f}"
-            address_line1 = f"{random.randint(1, 9999)} Main St"
-            city = f"City {i}"
-            state = random.choice(["CA", "NY", "TX", "AZ"])
-            zip_code = f"{random.randint(10000, 99999)}"
-            country = "USA"
+- **Scope:** Rebuild encompasses all resources and infrastructure components that do not require external ServiceNow tickets to restore.
+- **Exclusions:** Resources requiring ServiceNow tickets for restoration are out of scope.
 
-            account_data = {
-                "ACCOUNTNUMBER": account_number,
-                "CUSTOMERID": customer_id,
-                "DATEOPENED": date_opened,
-                "ACCOUNTHOLDERNAME": account_holder_name,
-                "ENTITYNAME": entity_name,
-                "OFFICENAME": office_name,
-                "TITLE3": "",
-                "MAJORACCOUNTTYPE": major_account_type,
-                "MINORACCOUNTTYPE": minor_account_type,
-                "ACCOUNTSTATUS": account_status,
-                "AVAILABLEBALANCE": available_balance,
-                "CURRENTBALANCE": current_balance,
-                "ADDRESSLINE1": address_line1,
-                "ADDRESSLINE2": f"{city}, {state} {zip_code}",
-                "ADDRESSLINE3": "",
-                "CITY": city,
-                "STATE": state,
-                "ZIP": zip_code,
-                "COUNTRY": country,
-            }
+---
 
-            payload.append(account_data)
-            existing_accounts.append(account_data)
+**Approach and Activity Tracker:**
 
-        # Generate 5,000 updates for existing accounts
-        for i in range(count // 2):
-            account_to_update = random.choice(existing_accounts)
-            updated_account = account_to_update.copy()
+**Phase 1: Preparation**
 
-            # Update a few fields to simulate changes
-            updated_account["AVAILABLEBALANCE"] = f"{random.uniform(0, 100000):.2f}"
-            updated_account["CURRENTBALANCE"] = f"{random.uniform(0, 100000):.2f}"
-            updated_account["ACCOUNTSTATUS"] = random.choice(["ACT", "IACT", "APPR"])
+1. **Review and Document Existing Runbooks**
+   - Ensure runbooks are up to date.
+   - Identify any gaps in procedures or documentation.
 
-            payload.append(updated_account)
+2. **Setup for Non-Prod Testing**
+   - Select a non-production account for testing.
+   - Communicate timelines and testing schedules with stakeholders.
 
-        return payload
+**Phase 2: Execution**
 
-    @task
-    def post_account_data(self):
-        # Generate a payload with 10,000 records (5,000 new and 5,000 updates)
-        payload = self.generate_payload(10000)
+1. **Infrastructure Tear Down**
+   - Decommission existing infrastructure in the non-prod account.
+   - Confirm complete teardown.
 
-        # Send a POST request
-        with self.client.post(
-            url="/accounts",
-            json=payload,
-            headers={"Authorization": f"Bearer {self.token}"},
-            catch_response=True,
-        ) as response:
-            if response.status_code == 200:
-                response.success()
-            else:
-                response.failure(f"Failed with status code: {response.text}")
+2. **Rebuild Infrastructure**
+   - Recreate infrastructure using the Terraform pipeline.
+   - Verify that all components are properly provisioned.
 
-    def on_start(self):
-        """on_start is called when a Locust start before any task is scheduled"""
-        self.token = load_test_helper.generate_test_token()
+3. **Application Deployment**
+   - Redeploy the Azure Function application.
+   - Confirm deployment success.
+
+4. **Database Restoration**
+   - Restore the database snapshot from a deleted DB using the “Dump and Restore” method for Azure Database for PostgreSQL – Flexible Server.
+   - Validate the database is restored and operational.
+
+5. **Data Processing**
+   - Run the Azure Data Factory pipeline.
+   - Verify data processing and pipeline functionality.
+
+**Phase 3: Validation**
+
+1. **Regression Testing**
+   - Execute regression test suites to ensure application functionality.
+   - Document results and address any issues identified.
+
+2. **Verification of Rebuild**
+   - Confirm that all services and components are operational.
+   - Validate that the system matches the state prior to teardown.
+
+**Phase 4: Documentation and Reporting**
+
+1. **Proof of Rebuild**
+   - Compile logs, screenshots, and other documentation as proof of successful rebuild.
+   - Attach documentation to the Jira story.
+
+2. **Stakeholder Review**
+   - Share results and lessons learned with Hillary Reser and the Resilience and Recovery team.
+   - Address feedback and refine runbooks as necessary.
+
+---
+
+**Runbook Structure:**
+
+**1. Introduction**
+
+- The purpose of this runbook is to outline the steps for tearing down and rebuilding the Midas Shadowcore infrastructure and application to ensure resilience and recovery capability.
+- The scope includes all internal resources excluding those requiring ServiceNow tickets.
+
+**2. Prerequisites**
+
+- **Access Requirements:** Ensure access to the non-prod account and required tools (Terraform, Azure Portal, Database utilities).
+- **Backup Verification:** Confirm availability and integrity of database snapshots.
+- **Notifications:** Inform stakeholders of scheduled activity.
+
+**3. Infrastructure Tear Down**
+
+- Navigate to the non-prod account.
+- Identify and decommission all infrastructure components (compute, storage, network, etc.).
+- Validate that all resources have been removed.
+
+**4. Infrastructure Rebuild**
+
+- Execute the Terraform pipeline to recreate infrastructure.
+- Verify that:
+  - Compute resources (VMs, functions) are provisioned.
+  - Storage accounts and configurations are accurate.
+  - Network settings (VPC, subnets, security groups) are correct.
+
+**5. Application Deployment**
+
+- Deploy the Azure Function application using the deployment pipeline.
+- Verify:
+  - Application endpoints are reachable.
+  - Configuration settings match expected values.
+
+**6. Database Restoration**
+
+- Use the "Dump and Restore" method:
+  - Take the database dump from the snapshot.
+  - Restore it to a new database instance.
+- Validate:
+  - Database schema integrity.
+  - Successful connection to the application.
+
+**7. Data Processing Verification**
+
+- Trigger the Azure Data Factory pipeline.
+- Verify:
+  - Pipeline completes without errors.
+  - Data outputs match expected results.
+
+**8. Testing and Validation**
+
+- Execute regression test suites:
+  - Functional tests.
+  - Performance checks.
+  - End-to-end scenarios.
+- Ensure no major issues are encountered.
+
+**9. Documentation and Reporting**
+
+- Collect logs, screenshots, and configuration details.
+- Compile them into a rebuild report.
+- Attach the report to the Jira story.
+
+**10. Troubleshooting**
+
+- **Common Issues:**
+  - Terraform state lock issues.
+  - Database connection errors.
+- **Resolutions:**
+  - Retry or unlock Terraform state.
+  - Validate database connection strings.
+- **Escalation Contacts:**
+  - Infrastructure lead.
+  - Database administrator.
+
+---
+
+**Ownership:**
+
+- Requested by: Hillary Reser (Resilience and Recovery Team)
+- Implementation Lead: Ruchit Nahata
+- Reviewer: Mitchell Phillips
+
+---
+
+**Notes and Recommendations:**
+
+- **Backup Verification:** Ensure backup mechanisms are tested and reliable before proceeding with teardown.
+- **Time Buffer:** Allocate sufficient time for unforeseen challenges during the rebuild.
+- **Collaboration:** Encourage team input to refine the process and accommodate service-specific nuances.
+
+stages:
+  - dump
+  - restore
+
+variables:
+  POSTGRES_HOST: trstans1midaps2d.postgres.database.azure.com
+  POSTGRES_USER: trustadmin
+  POSTGRES_PASSWORD: My:s3Cr3t/
+  POSTGRES_PORT: 5432
+  POSTGRES_DB: shadowcore_test
+
+dump_database:
+  stage: dump
+  image: postgres:14
+  script:
+    - export PGPASSWORD=$POSTGRES_PASSWORD
+    - pg_dump -h $POSTGRES_HOST -U $POSTGRES_USER -p $POSTGRES_PORT $POSTGRES_DB > shadowcore_test_dump.sql
+  artifacts:
+    paths:
+      - shadowcore_test_dump.sql
+
+restore_database:
+  stage: restore
+  image: postgres:14
+  dependencies:
+    - dump_database
+  script:
+    - export PGPASSWORD=$POSTGRES_PASSWORD
+    - createdb -h $POSTGRES_HOST -U $POSTGRES_USER -p $POSTGRES_PORT shadowcore_test_copy
+    - psql -h $POSTGRES_HOST -U $POSTGRES_USER -p $POSTGRES_PORT -f shadowcore_test_dump.sql shadowcore_test_copy
