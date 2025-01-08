@@ -206,3 +206,6 @@ docker exec -it postgres-container pg_dump shadowcore_test -h trstans1midaps2d.p
 docker exec -it postgres-container createdb shadowcore_test_copy -h trstans1midaps2d.postgres.database.azure.com -p 5432 -U trustadmin
 docker exec -it postgres-container psql -f shadowcore_test_dump.sql shadowcore_test_copy -h trstans1midaps2d.postgres.database.azure.com -p 5432 -U trustadmin
 
+docker exec -it postgres-container bash -c "PGPASSWORD='MySecurePass' pg_dump shadowcore_test -h trstans1midaps2d.postgres.database.azure.com -U trustadmin -p 5432" > shadowcore_test_dump.sql
+
+
