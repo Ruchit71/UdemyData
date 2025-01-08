@@ -198,3 +198,11 @@ restore_database:
     - export PGPASSWORD=$POSTGRES_PASSWORD
     - createdb -h $POSTGRES_HOST -U $POSTGRES_USER -p $POSTGRES_PORT shadowcore_test_copy
     - psql -h $POSTGRES_HOST -U $POSTGRES_USER -p $POSTGRES_PORT -f shadowcore_test_dump.sql shadowcore_test_copy
+
+
+
+docker run -d --name postgres-container -e TZ=UTC -e POSTGRES_PASSWORD=My:s3Cr3t/ -p 30432:5432 ubuntu/postgres:14-22.04_beta
+docker exec -it postgres-container pg_dump shadowcore_test -h trstans1midaps2d.postgres.database.azure.com -U trustadmin -p 5432 > shadowcore_test_dump.sql
+docker exec -it postgres-container createdb shadowcore_test_copy -h trstans1midaps2d.postgres.database.azure.com -p 5432 -U trustadmin
+docker exec -it postgres-container psql -f shadowcore_test_dump.sql shadowcore_test_copy -h trstans1midaps2d.postgres.database.azure.com -p 5432 -U trustadmin
+
