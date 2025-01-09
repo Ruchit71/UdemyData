@@ -1,12 +1,44 @@
-Step	Validation Activity	Description
-Backup Verification	Validate the availability and integrity of database snapshots.	Confirm that database snapshots are accessible and not corrupted.
-Infrastructure Tear Down	Verify removal of all specified resources.	Check GitLab pipeline logs, Azure Portal, and Terraform output to ensure APIs, containers, queues, and other resources have been successfully removed.
-Evidence Capturing	Confirm evidence is captured and attached to JIRA.	Validate screenshots, logs, and Terraform output are attached to the corresponding JIRA ticket for audit purposes.
-Infrastructure Rebuild	Validate recreation of all infrastructure components.	Confirm successful Terraform pipeline execution, verify all resources (APIs, storage containers, Event Hub subscriptions, etc.) are correctly recreated.
-Connection Testing	Test the connection to all resources and verify health checks.	Use Postman and Splunk logs to ensure all APIs return successful responses and logs indicate system health.
-Database Restoration	Validate the "Dump and Restore" process for the database.	Check that the database is successfully restored using the provided commands and schema integrity is preserved.
-Database Schema Integrity	Validate schema matches expected structure.	Use database tools to compare the restored schema against the expected schema to confirm integrity.
-Azure Function Connectivity	Test database connectivity from Azure Function.	Verify the Azure Function can successfully connect to the restored database.
-Database Cleanup	Confirm deletion of the test database after validation.	Check that the test database instance is removed using the specified Docker commands.
-Log Verification	Ensure health_check results are logged in Splunk.	Verify Splunk query results show "health_check Midas-ShadowCore dev 200" entries indicating successful health checks.
-Overall Validation	Validate overall recovery capability and document the results.	Compile all evidence and testing results into a final validation report to confirm resilience and recovery capability.
+from azure.eventhub import EventHubConsumerClient
+
+# Replace with your Event Hub connection details
+EVENT_HUB_CONNECTION_STRING = "YOUR_EVENT_HUB_CONNECTION_STRING"
+EVENT_HUB_NAME = "YOUR_EVENT_HUB_NAME"
+CONSUMER_GROUP_NAME = "$Default"  # Replace with your consumer group if different
+
+def on_event(partition_context, event):
+    """
+    Callback function that gets called when a message is received.
+    """
+    print(f"Received event from partition: {partition_context.partition_id}")
+    print(f"Message: {event.body_as_str()}")
+    print(f"Properties: {event.properties}")
+    print(f"System Properties: {event.system_properties}")
+    print("-" * 50)
+
+def main():
+    """
+    Main function to set up the Event Hub client and fetch logs.
+    """
+    # Initialize the EventHubConsumerClient
+    client = EventHubConsumerClient.from_connection_string(
+        EVENT_HUB_CONNECTION_STRING,
+        consumer_group=CONSUMER_GROUP_NAME,
+        eventhub_name=EVENT_HUB_NAME,
+    )
+
+    try:
+        print("Starting to receive messages...")
+        # Start receiving messages
+        with client:
+            client.receive(
+                on_event=on_event,
+                starting_position="-1",  # "-1" means read from the beginning of the stream
+            )
+    except KeyboardInterrupt:
+        print("Receiving stopped.")
+    finally:
+        print("Closing client...")
+        client.close()
+
+if __name__ == "__main__":
+    main()
